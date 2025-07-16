@@ -157,6 +157,70 @@ class Transport:
                 
         return terms
     
+    def training_losses_cfg_distill(
+        self, 
+        model,
+        model_cfg, 
+        x1, 
+        model_kwargs=None,
+        model_cfg_kwargs=None,
+    ):
+        """Loss for training the score model
+        Args:
+        - model: backbone model; could be score, noise, or velocity
+        - model_cfg: cfg distillation model; could be score, noise, or velocity
+        - x1: datapoint
+        - model_kwargs: additional arguments for the model
+        """
+        if model_kwargs == None:
+            model_kwargs = {}
+        
+        t, x0, x1 = self.sample(x1)
+        t, xt, ut = self.path_sampler.plan(t, x0, x1)
+        model_output = model(xt, t, **model_kwargs)
+        with th.no_grad():
+            # Expand latent
+            xt_ = th.cat([xt, xt], dim=0) 
+            # Expand class labels
+            ys_ = model_cfg_kwargs['y']
+            y_null = th.tensor([1000] * len(xt), device=xt.device)
+            ys_ = th.cat([ys_, y_null], dim=0)
+            model_cfg_kwargs['y'] = ys_
+            model_cfg_kwargs['cfg_scale'] =model_cfg_kwargs['cfg_scale'].view(-1, 1, 1, 1)  # make sure cfg_scale is broadcastable
+            # Expand time
+            t_ = th.cat([t, t], dim=0)
+            assert xt_.shape[0] == ys_.shape[0], "xt_ and ys_ must have the same shape"
+            assert xt_.shape[0] == t_.shape[0], "xt_ and t_ must have the same shape"
+            model_cfg_output = model_cfg.forward_with_cfg(xt_, t_, **model_cfg_kwargs)
+            model_cfg_output, _ = model_cfg_output.chunk(2, dim=0)  # Take the first half of the output
+        B, *_, C = xt.shape
+        assert model_output.size() == (B, *xt.size()[1:-1], C)
+        assert model_cfg_output.size() == (B, *xt.size()[1:-1], C)
+
+        terms = {}
+        terms['pred'] = model_output
+        if self.model_type == ModelType.VELOCITY:
+            terms['loss'] = mean_flat(((model_output - model_cfg_output) ** 2))
+        else: 
+            # _, drift_var = self.path_sampler.compute_drift(xt, t)
+            # sigma_t, _ = self.path_sampler.compute_sigma_t(path.expand_t_like_x(t, xt))
+            # if self.loss_type in [WeightType.VELOCITY]:
+            #     weight = (drift_var / sigma_t) ** 2
+            # elif self.loss_type in [WeightType.LIKELIHOOD]:
+            #     weight = drift_var / (sigma_t ** 2)
+            # elif self.loss_type in [WeightType.NONE]:
+            #     weight = 1
+            # else:
+            #     raise NotImplementedError()
+            
+            # if self.model_type == ModelType.NOISE:
+            #     terms['loss'] = mean_flat(weight * ((model_output - x0) ** 2))
+            # else:
+            #     terms['loss'] = mean_flat(weight * ((model_output * sigma_t + x0) ** 2))
+            raise NotImplementedError("self.model_type != ModelType.VELOCITY is not implemented for cfg distillation")
+                
+        return terms
+    
 
     def get_drift(
         self
@@ -341,7 +405,7 @@ class Sampler:
     def sample_ode(
         self,
         *,
-        sampling_method="dopri5",
+        sampling_method="euler",
         num_steps=50,
         atol=1e-6,
         rtol=1e-3,

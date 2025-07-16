@@ -153,17 +153,27 @@ def main(args):
     )
 
     # Note that parameter initialization is done within the SiT constructor
+    model_cfg = deepcopy(model).to(device)  # Create a copy of the model for use in cfg distillation
+    model.learn_guidance_embedding = True  #  model learns guidance embedding
+    model.init_guidance_embedding()  # Initialize guidance embedding weights
     ema = deepcopy(model).to(device)  # Create an EMA of the model for use after training
 
     if args.ckpt is not None:
+        print(f"Loading checkpoint from {args.ckpt}...")
         ckpt_path = args.ckpt
         state_dict = find_model(ckpt_path)
-        model.load_state_dict(state_dict["model"])
-        ema.load_state_dict(state_dict["ema"])
-        opt.load_state_dict(state_dict["opt"])
-        args = state_dict["args"]
+        if "model" in state_dict:  # supports checkpoints from training checkpoint
+            model.load_state_dict(state_dict["model"])
+            ema.load_state_dict(state_dict["ema"])
+            model_cfg.load_state_dict(state_dict["model_cfg"])
+            args = state_dict["args"]
+        else:  # supports checkpoints from sample.py
+            model_cfg.load_state_dict(state_dict)
+            model.load_state_dict(state_dict, strict=False)  # allow missing keys due to guidance embedding
+            ema.load_state_dict(state_dict, strict=False)  # allow missing keys due to guidance embedding
 
     requires_grad(ema, False)
+    requires_grad(model_cfg, False)  # cfg distillation model should not be trained
     
     model = DDP(model.to(device), device_ids=[rank])
     transport = create_transport(
@@ -175,10 +185,11 @@ def main(args):
     )  # default: velocity; 
     transport_sampler = Sampler(transport)
     vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{args.vae}").to(device)
+    vae.enable_slicing()
     logger.info(f"SiT Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     # Setup optimizer (we used default Adam betas=(0.9, 0.999) and a constant learning rate of 1e-4 in our paper):
-    opt = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0)
+    opt = torch.optim.AdamW(model.parameters(), lr=1e-5, weight_decay=0)
 
     # Setup data:
     transform = transforms.Compose([
@@ -210,6 +221,7 @@ def main(args):
     update_ema(ema, model.module, decay=0)  # Ensure EMA is initialized with synced weights
     model.train()  # important! This enables embedding dropout for classifier-free guidance
     ema.eval()  # EMA model should always be in eval mode
+    model_cfg.eval()  # cfg distillation model should always be in eval mode
 
     # Variables for monitoring/logging purposes:
     train_steps = 0
@@ -226,27 +238,39 @@ def main(args):
 
     # Setup classifier-free guidance:
     if use_cfg:
-        zs = torch.cat([zs, zs], 0)
-        y_null = torch.tensor([1000] * n, device=device)
-        ys = torch.cat([ys, y_null], 0)
-        sample_model_kwargs = dict(y=ys, cfg_scale=args.cfg_scale)
-        model_fn = ema.forward_with_cfg
+        # zs = torch.cat([zs, zs], 0)
+        # y_null = torch.tensor([1000] * n, device=device)
+        # ys = torch.cat([ys, y_null], 0)
+        # sample_model_kwargs = dict(y=ys, cfg_scale=args.cfg_scale)
+        # model_fn = ema.forward_with_cfg
+
+        sample_model_kwargs = dict(y=ys, g=torch.Tensor([args.cfg_scale] * n).to(device))  # Guidance scale
+        model_fn = model.forward
     else:
         sample_model_kwargs = dict(y=ys)
         model_fn = ema.forward
 
     logger.info(f"Training for {args.epochs} epochs...")
+    from tqdm import tqdm
     for epoch in range(args.epochs):
         sampler.set_epoch(epoch)
         logger.info(f"Beginning epoch {epoch}...")
-        for x, y in loader:
+        for x, y in tqdm(loader, desc=f"Epoch {epoch + 1}/{args.epochs}", disable=rank != 0, leave=False, total=len(loader)):
             x = x.to(device)
             y = y.to(device)
             with torch.no_grad():
                 # Map input images to latent space + normalize latents:
                 x = vae.encode(x).latent_dist.sample().mul_(0.18215)
-            model_kwargs = dict(y=y)
-            loss_dict = transport.training_losses(model, x, model_kwargs)
+
+            # Sample random guidance scale for training:
+            g = torch.rand(n, device=device) * (8.0 - 1.0) + 1.0
+            model_kwargs = dict(y=y, g=g)
+            model_cfg_kwargs = dict(y=y, cfg_scale=g)
+            
+            loss_dict = transport.training_losses_cfg_distill(
+                model, model_cfg, x, model_kwargs, model_cfg_kwargs
+            )
+            
             loss = loss_dict["loss"].mean()
             opt.zero_grad()
             loss.backward()
@@ -284,6 +308,7 @@ def main(args):
                         "model": model.module.state_dict(),
                         "ema": ema.state_dict(),
                         "opt": opt.state_dict(),
+                        "model_cfg": model_cfg.state_dict(),
                         "args": args
                     }
                     checkpoint_path = f"{checkpoint_dir}/{train_steps:07d}.pt"
@@ -291,20 +316,36 @@ def main(args):
                     logger.info(f"Saved checkpoint to {checkpoint_path}")
                 dist.barrier()
             
-            if train_steps % args.sample_every == 0 and train_steps > 0:
-                logger.info("Generating EMA samples...")
-                sample_fn = transport_sampler.sample_ode() # default to ode sampling
-                samples = sample_fn(zs, model_fn, **sample_model_kwargs)[-1]
-                dist.barrier()
+            with torch.no_grad():
+                if train_steps % args.sample_every == 0 and train_steps > 0:
+                    logger.info("Generating EMA samples...")
+                    sample_fn = transport_sampler.sample_ode() # default to ode sampling
+                    samples = sample_fn(zs, model_fn, **sample_model_kwargs)[-1]
+                    dist.barrier()
 
-                if use_cfg: #remove null samples
-                    samples, _ = samples.chunk(2, dim=0)
-                samples = vae.decode(samples / 0.18215).sample
-                out_samples = torch.zeros((args.global_batch_size, 3, args.image_size, args.image_size), device=device)
-                dist.all_gather_into_tensor(out_samples, samples)
-                if args.wandb:
-                    wandb_utils.log_image(out_samples, train_steps)
-                logging.info("Generating EMA samples done.")
+                    # if use_cfg: #remove null samples
+                    #     samples, _ = samples.chunk(2, dim=0)
+                    samples = vae.decode(samples / 0.18215).sample
+                    out_samples = torch.zeros((args.global_batch_size, 3, args.image_size, args.image_size), device=device)
+                    dist.all_gather_into_tensor(out_samples, samples)
+                    if args.wandb:
+                        wandb_utils.log_image(out_samples, cfg=True, step=train_steps)
+                    logging.info("[CFG] Generating EMA samples done.")
+
+                    sample_fn = transport_sampler.sample_ode() # default to ode sampling
+                    g = torch.Tensor([1.0] * n).to(device)  # Baseline guidance scale
+                    baseline_kwargs = dict(y=ys, g=g)
+                    samples = sample_fn(zs, model_fn, **baseline_kwargs)[-1]
+                    dist.barrier()
+
+                    # if use_cfg: #remove null samples
+                    #     samples, _ = samples.chunk(2, dim=0)
+                    samples = vae.decode(samples / 0.18215).sample
+                    out_samples = torch.zeros((args.global_batch_size, 3, args.image_size, args.image_size), device=device)
+                    dist.all_gather_into_tensor(out_samples, samples)
+                    if args.wandb:
+                        wandb_utils.log_image(out_samples, cfg=False, step=train_steps)
+                    logging.info("[Baseline] Generating EMA samples done.")
 
     model.eval()  # important! This disables randomized embedding dropout
     # do any sampling/FID calculation/etc. with ema (or model) in eval mode ...
@@ -322,13 +363,13 @@ if __name__ == "__main__":
     parser.add_argument("--image-size", type=int, choices=[256, 512], default=256)
     parser.add_argument("--num-classes", type=int, default=1000)
     parser.add_argument("--epochs", type=int, default=1400)
-    parser.add_argument("--global-batch-size", type=int, default=256)
+    parser.add_argument("--global-batch-size", type=int, default=8)
     parser.add_argument("--global-seed", type=int, default=0)
     parser.add_argument("--vae", type=str, choices=["ema", "mse"], default="ema")  # Choice doesn't affect training
     parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--log-every", type=int, default=100)
-    parser.add_argument("--ckpt-every", type=int, default=50_000)
-    parser.add_argument("--sample-every", type=int, default=10_000)
+    parser.add_argument("--log-every", type=int, default=5)
+    parser.add_argument("--ckpt-every", type=int, default=10_000)
+    parser.add_argument("--sample-every", type=int, default=250)
     parser.add_argument("--cfg-scale", type=float, default=4.0)
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--ckpt", type=str, default=None,

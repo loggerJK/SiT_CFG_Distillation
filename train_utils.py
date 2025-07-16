@@ -7,13 +7,13 @@ def parse_transport_args(parser):
     group = parser.add_argument_group("Transport arguments")
     group.add_argument("--path-type", type=str, default="Linear", choices=["Linear", "GVP", "VP"])
     group.add_argument("--prediction", type=str, default="velocity", choices=["velocity", "score", "noise"])
-    group.add_argument("--loss-weight", type=none_or_str, default=None, choices=[None, "velocity", "likelihood"])
+    group.add_argument("--loss-weight", type=none_or_str, default='velocity', choices=[None, "velocity", "likelihood"])
     group.add_argument("--sample-eps", type=float)
     group.add_argument("--train-eps", type=float)
 
 def parse_ode_args(parser):
     group = parser.add_argument_group("ODE arguments")
-    group.add_argument("--sampling-method", type=str, default="dopri5", help="blackbox ODE solver methods; for full list check https://github.com/rtqichen/torchdiffeq")
+    group.add_argument("--sampling-method", type=str, default="euler", help="blackbox ODE solver methods; for full list check https://github.com/rtqichen/torchdiffeq")
     group.add_argument("--atol", type=float, default=1e-6, help="Absolute tolerance")
     group.add_argument("--rtol", type=float, default=1e-3, help="Relative tolerance")
     group.add_argument("--reverse", action="store_true")

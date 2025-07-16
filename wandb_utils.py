@@ -42,10 +42,13 @@ def log(stats, step=None):
         wandb.log({k: v for k, v in stats.items()}, step=step)
 
 
-def log_image(sample, step=None):
+def log_image(sample, cfg=False, step=None):
     if is_main_process():
         sample = array2grid(sample)
-        wandb.log({f"samples": wandb.Image(sample), "train_step": step})
+        if cfg:
+            wandb.log({f"samples_cfg": wandb.Image(sample), "train_step": step})
+        else:
+            wandb.log({f"samples": wandb.Image(sample), "train_step": step})
 
 
 def array2grid(x):
