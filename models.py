@@ -28,7 +28,7 @@ class TimestepEmbedder(nn.Module):
     def __init__(self, hidden_size, frequency_embedding_size=256):
         super().__init__()
         self.mlp = nn.Sequential(
-            nn.Linear(frequency_embedding_size, hidden_size, bias=True),
+            nn.Linear(frequency_embedding_size, hidden_size, bias=True), # frequency_embedding_size(256 -> hidden_size(1152)
             nn.SiLU(),
             nn.Linear(hidden_size, hidden_size, bias=True),
         )
@@ -46,6 +46,7 @@ class TimestepEmbedder(nn.Module):
         """
         # https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
         half = dim // 2
+        original_dtype = t.dtype
         freqs = torch.exp(
             -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half
         ).to(device=t.device)
@@ -53,7 +54,7 @@ class TimestepEmbedder(nn.Module):
         embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
         if dim % 2:
             embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
-        return embedding
+        return embedding.to(dtype=original_dtype)
 
     def forward(self, t):
         t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
@@ -282,7 +283,7 @@ class SiT(nn.Module):
         # https://github.com/openai/glide-text2im/blob/main/notebooks/text2im.ipynb
         half = x[: len(x) // 2]
         combined = torch.cat([half, half], dim=0)
-        model_out = self.forward(combined, t, y)
+        model_out = self.forward(combined, t, y, g = torch.Tensor([0.0]*len(combined)).to(x.device))
         # For exact reproducibility reasons, we apply classifier-free guidance on only
         # three channels by default. The standard approach to cfg applies it to all channels.
         # This can be done by uncommenting the following line and commenting-out the line following that.

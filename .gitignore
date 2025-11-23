@@ -1,3 +1,7 @@
+eval_fid/
+*.pt
+wget-log*
+
 __pycache__
 wandb
 

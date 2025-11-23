@@ -186,7 +186,7 @@ class Transport:
             y_null = th.tensor([1000] * len(xt), device=xt.device)
             ys_ = th.cat([ys_, y_null], dim=0)
             model_cfg_kwargs['y'] = ys_
-            model_cfg_kwargs['cfg_scale'] =model_cfg_kwargs['cfg_scale'].view(-1, 1, 1, 1)  # make sure cfg_scale is broadcastable
+            model_cfg_kwargs['cfg_scale'] = model_cfg_kwargs['cfg_scale'].view(-1, 1, 1, 1)  # make sure cfg_scale is broadcastable
             # Expand time
             t_ = th.cat([t, t], dim=0)
             assert xt_.shape[0] == ys_.shape[0], "xt_ and ys_ must have the same shape"

@@ -38,7 +38,7 @@ def main(mode, args):
     model = SiT_models[args.model](
         input_size=latent_size,
         num_classes=args.num_classes,
-        learn_sigma=learn_sigma,
+        learn_sigma=True,
     ).to(device)
     # Auto-download a pre-trained model or load a custom SiT checkpoint from train.py:
     ckpt_path = args.ckpt or f"SiT-XL-2-{args.image_size}x{args.image_size}.pt"
@@ -85,7 +85,8 @@ def main(mode, args):
     vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{args.vae}").to(device)
 
     # Labels to condition the model with (feel free to change):
-    class_labels = [207, 360, 387, 974, 88, 979, 417, 279]
+    # class_labels = [207, 360, 387, 974, 88, 979, 417, 279]
+    class_labels = list(range(8))
     
     # Create sampling noise:
     n = len(class_labels)
@@ -106,7 +107,7 @@ def main(mode, args):
     print(f"Sampling took {time() - start_time:.2f} seconds.")
 
     # Save and display images:
-    save_image(samples, "sample.png", nrow=4, normalize=True, value_range=(-1, 1))
+    save_image(samples, f"sample_original_scale{args.cfg_scale}.png", nrow=4, normalize=True, value_range=(-1, 1))
 
 
 if __name__ == "__main__":
@@ -126,7 +127,7 @@ if __name__ == "__main__":
     parser.add_argument("--image-size", type=int, choices=[256, 512], default=256)
     parser.add_argument("--num-classes", type=int, default=1000)
     parser.add_argument("--cfg-scale", type=float, default=4.0)
-    parser.add_argument("--num-sampling-steps", type=int, default=250)
+    parser.add_argument("--num-sampling-steps", type=int, default=20)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--ckpt", type=str, default=None,
                         help="Optional path to a SiT checkpoint (default: auto-download a pre-trained SiT-XL/2 model).")
